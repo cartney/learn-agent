@@ -25,6 +25,7 @@ policy, hooks, and lifecycle controls on top.
 """
 
 import os
+import json
 import subprocess
 
 try:
@@ -38,26 +39,29 @@ try:
 except ImportError:
     pass
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL")
+api_key = os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+client = OpenAI(api_key=api_key, base_url=base_url)
 MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 TOOLS = [{
-    "name": "bash",
-    "description": "Run a shell command.",
-    "input_schema": {
-        "type": "object",
-        "properties": {"command": {"type": "string"}},
-        "required": ["command"],
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
     },
 }]
 
@@ -80,25 +84,34 @@ def run_bash(command: str) -> str:
 # -- The core pattern: a while loop that calls tools until the model stops --
 def agent_loop(messages: list):
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
+        if not messages or messages[0].get("role") != "system":
+            messages.insert(0, {"role": "system", "content": SYSTEM})
+        response = client.chat.completions.create(
+            model=MODEL, messages=messages,
             tools=TOOLS, max_tokens=8000,
         )
         # Append assistant turn
-        messages.append({"role": "assistant", "content": response.content})
+        assistant_message = response.choices[0].message
+        messages.append(assistant_message.model_dump(exclude_none=True))
         # If the model didn't call a tool, we're done
-        if response.stop_reason != "tool_use":
+        if response.choices[0].finish_reason != "tool_calls":
             return
         # Execute each tool call, collect results
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
+        for tool_call in assistant_message.tool_calls or []:
+            if tool_call.type == "function":
+                args = json.loads(tool_call.function.arguments or "{}")
+                print(f"\033[33m$ {tool_call.function.name} {args.get('command', '')}\033[0m")
+                output = run_bash(args["command"])
                 print(output[:200])
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": output})
-        messages.append({"role": "user", "content": results})
+                results.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": output,
+                    }
+                )
+        messages.extend(results)
 
 
 if __name__ == "__main__":
@@ -112,9 +125,8 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        for block in reversed(history):
+            if block.get("role") == "assistant" and isinstance(block.get("content"), str):
+                print(block["content"])
+                break
         print()
