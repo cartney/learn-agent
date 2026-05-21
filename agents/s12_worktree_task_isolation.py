@@ -37,16 +37,16 @@ import subprocess
 import time
 from pathlib import Path
 
-from anthropic import Anthropic
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+client = OpenAI(
+    base_url=os.getenv("OPENAI_BASE_URL") or None,
+    api_key=os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY", ""),
+)
 MODEL = os.environ["MODEL_ID"]
 
 
@@ -553,209 +553,79 @@ TOOL_HANDLERS = {
 }
 
 TOOLS = [
-    {
-        "name": "bash",
-        "description": "Run a shell command in the current workspace (blocking).",
-        "input_schema": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-        },
-    },
-    {
-        "name": "read_file",
-        "description": "Read file contents.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "limit": {"type": "integer"},
-            },
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "write_file",
-        "description": "Write content to file.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-            },
-            "required": ["path", "content"],
-        },
-    },
-    {
-        "name": "edit_file",
-        "description": "Replace exact text in file.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "old_text": {"type": "string"},
-                "new_text": {"type": "string"},
-            },
-            "required": ["path", "old_text", "new_text"],
-        },
-    },
-    {
-        "name": "task_create",
-        "description": "Create a new task on the shared task board.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "subject": {"type": "string"},
-                "description": {"type": "string"},
-            },
-            "required": ["subject"],
-        },
-    },
-    {
-        "name": "task_list",
-        "description": "List all tasks with status, owner, and worktree binding.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "task_get",
-        "description": "Get task details by ID.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"task_id": {"type": "integer"}},
-            "required": ["task_id"],
-        },
-    },
-    {
-        "name": "task_update",
-        "description": "Update task status or owner.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "integer"},
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "completed"],
-                },
-                "owner": {"type": "string"},
-            },
-            "required": ["task_id"],
-        },
-    },
-    {
-        "name": "task_bind_worktree",
-        "description": "Bind a task to a worktree name.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "integer"},
-                "worktree": {"type": "string"},
-                "owner": {"type": "string"},
-            },
-            "required": ["task_id", "worktree"],
-        },
-    },
-    {
-        "name": "worktree_create",
-        "description": "Create a git worktree and optionally bind it to a task.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "task_id": {"type": "integer"},
-                "base_ref": {"type": "string"},
-            },
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "worktree_list",
-        "description": "List worktrees tracked in .worktrees/index.json.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "worktree_status",
-        "description": "Show git status for one worktree.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "worktree_run",
-        "description": "Run a shell command in a named worktree directory.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "command": {"type": "string"},
-            },
-            "required": ["name", "command"],
-        },
-    },
-    {
-        "name": "worktree_remove",
-        "description": "Remove a worktree and optionally mark its bound task completed.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "force": {"type": "boolean"},
-                "complete_task": {"type": "boolean"},
-            },
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "worktree_keep",
-        "description": "Mark a worktree as kept in lifecycle state without removing it.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "worktree_events",
-        "description": "List recent worktree/task lifecycle events from .worktrees/events.jsonl.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"limit": {"type": "integer"}},
-        },
-    },
+    {"type": "function", "function": {"name": "bash", "description": "Run a shell command in the current workspace (blocking).",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read file contents.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Write content to file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
+    {"type": "function", "function": {"name": "task_create", "description": "Create a new task on the shared task board.",
+     "parameters": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}}, "required": ["subject"]}}},
+    {"type": "function", "function": {"name": "task_list", "description": "List all tasks with status, owner, and worktree binding.",
+     "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "task_get", "description": "Get task details by ID.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "task_update", "description": "Update task status or owner.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}, "owner": {"type": "string"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "task_bind_worktree", "description": "Bind a task to a worktree name.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}, "worktree": {"type": "string"}, "owner": {"type": "string"}}, "required": ["task_id", "worktree"]}}},
+    {"type": "function", "function": {"name": "worktree_create", "description": "Create a git worktree and optionally bind it to a task.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "task_id": {"type": "integer"}, "base_ref": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "worktree_list", "description": "List worktrees tracked in .worktrees/index.json.",
+     "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "worktree_status", "description": "Show git status for one worktree.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "worktree_run", "description": "Run a shell command in a named worktree directory.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "command": {"type": "string"}}, "required": ["name", "command"]}}},
+    {"type": "function", "function": {"name": "worktree_remove", "description": "Remove a worktree and optionally mark its bound task completed.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "force": {"type": "boolean"}, "complete_task": {"type": "boolean"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "worktree_keep", "description": "Mark a worktree as kept in lifecycle state without removing it.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "worktree_events", "description": "List recent worktree/task lifecycle events from .worktrees/events.jsonl.",
+     "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}}},
 ]
 
 
 def agent_loop(messages: list):
+    if not any(m.get("role") == "system" for m in messages):
+        messages.insert(0, {"role": "system", "content": SYSTEM})
+
     while True:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
-            system=SYSTEM,
             messages=messages,
             tools=TOOLS,
             max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        choice = response.choices[0]
+        message = choice.message
+        finish_reason = choice.finish_reason
+
+        assistant_msg = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in message.tool_calls
+            ]
+        messages.append(assistant_msg)
+
+        if finish_reason != "tool_calls":
             return
 
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}:")
-                print(str(output)[:200])
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": str(output),
-                    }
-                )
+        for tc in message.tool_calls:
+            handler = TOOL_HANDLERS.get(tc.function.name)
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                output = handler(**args) if handler else f"Unknown tool: {tc.function.name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {tc.function.name}:")
+            print(str(output)[:200])
+            results.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
 
 
@@ -774,9 +644,7 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        last = history[-1]
+        if last["role"] == "assistant" and last.get("content"):
+            print(last["content"])
         print()

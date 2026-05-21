@@ -25,22 +25,23 @@ before each LLM call to deliver results.
 Key insight: "Fire and forget -- the agent doesn't block while the command runs."
 """
 
+import json
 import os
 import subprocess
 import threading
 import uuid
 from pathlib import Path
 
-from anthropic import Anthropic
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+client = OpenAI(
+    base_url=os.getenv("OPENAI_BASE_URL") or None,
+    api_key=os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY", ""),
+)
 MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use background_run for long-running commands."
@@ -170,48 +171,64 @@ TOOL_HANDLERS = {
 }
 
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command (blocking).",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "background_run", "description": "Run command in background thread. Returns task_id immediately.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "check_background", "description": "Check background task status. Omit task_id to list all.",
-     "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}}},
+    {"type": "function", "function": {"name": "bash", "description": "Run a shell command (blocking).",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read file contents.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Write content to file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
+    {"type": "function", "function": {"name": "background_run", "description": "Run command in background thread. Returns task_id immediately.",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "check_background", "description": "Check background task status. Omit task_id to list all.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}}}},
 ]
 
 
 def agent_loop(messages: list):
+    if not any(m.get("role") == "system" for m in messages):
+        messages.insert(0, {"role": "system", "content": SYSTEM})
+
     while True:
-        # Drain background notifications and inject as system message before LLM call
+        # Drain background notifications and inject before LLM call
         notifs = BG.drain_notifications()
-        if notifs and messages:
+        if notifs:
             notif_text = "\n".join(
                 f"[bg:{n['task_id']}] {n['status']}: {n['result']}" for n in notifs
             )
             messages.append({"role": "user", "content": f"<background-results>\n{notif_text}\n</background-results>"})
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
+        response = client.chat.completions.create(
+            model=MODEL, messages=messages,
             tools=TOOLS, max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        choice = response.choices[0]
+        message = choice.message
+        finish_reason = choice.finish_reason
+
+        assistant_msg = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in message.tool_calls
+            ]
+        messages.append(assistant_msg)
+
+        if finish_reason != "tool_calls":
             return
+
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}:")
-                print(str(output)[:200])
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
+        for tc in message.tool_calls:
+            handler = TOOL_HANDLERS.get(tc.function.name)
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                output = handler(**args) if handler else f"Unknown tool: {tc.function.name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {tc.function.name}:")
+            print(str(output)[:200])
+            results.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
 
 
@@ -226,9 +243,7 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        last = history[-1]
+        if last["role"] == "assistant" and last.get("content"):
+            print(last["content"])
         print()

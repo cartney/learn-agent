@@ -50,15 +50,16 @@ import threading
 import time
 from pathlib import Path
 
-from anthropic import Anthropic
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+client = OpenAI(
+    base_url=os.getenv("OPENAI_BASE_URL") or None,
+    api_key=os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY", ""),
+)
 MODEL = os.environ["MODEL_ID"]
 TEAM_DIR = WORKDIR / ".team"
 INBOX_DIR = TEAM_DIR / "inbox"
@@ -168,43 +169,54 @@ class TeammateManager:
             f"You are '{name}', role: {role}, at {WORKDIR}. "
             f"Use send_message to communicate. Complete your task."
         )
-        messages = [{"role": "user", "content": prompt}]
+        messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}]
         tools = self._teammate_tools()
         for _ in range(50):
             inbox = BUS.read_inbox(name)
             for msg in inbox:
                 messages.append({"role": "user", "content": json.dumps(msg)})
             try:
-                response = client.messages.create(
+                response = client.chat.completions.create(
                     model=MODEL,
-                    system=sys_prompt,
                     messages=messages,
                     tools=tools,
                     max_tokens=8000,
                 )
             except Exception:
                 break
-            messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason != "tool_use":
+            choice = response.choices[0]
+            message = choice.message
+            finish_reason = choice.finish_reason
+
+            assistant_msg = {"role": "assistant", "content": message.content}
+            if message.tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in message.tool_calls
+                ]
+            messages.append(assistant_msg)
+
+            if finish_reason != "tool_calls":
                 break
+
             results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    output = self._exec(name, block.name, block.input)
-                    print(f"  [{name}] {block.name}: {str(output)[:120]}")
-                    results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": str(output),
-                    })
+            for tc in message.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except Exception:
+                    args = {}
+                output = self._exec(name, tc.function.name, args)
+                print(f"  [{name}] {tc.function.name}: {str(output)[:120]}")
+                results.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
             messages.append({"role": "user", "content": results})
+
         member = self._find_member(name)
         if member and member["status"] != "shutdown":
             member["status"] = "idle"
             self._save_config()
 
     def _exec(self, sender: str, tool_name: str, args: dict) -> str:
-        # these base tools are unchanged from s02
         if tool_name == "bash":
             return _run_bash(args["command"])
         if tool_name == "read_file":
@@ -220,20 +232,19 @@ class TeammateManager:
         return f"Unknown tool: {tool_name}"
 
     def _teammate_tools(self) -> list:
-        # these base tools are unchanged from s02
         return [
-            {"name": "bash", "description": "Run a shell command.",
-             "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-            {"name": "read_file", "description": "Read file contents.",
-             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-            {"name": "write_file", "description": "Write content to file.",
-             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-            {"name": "edit_file", "description": "Replace exact text in file.",
-             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-            {"name": "send_message", "description": "Send message to a teammate.",
-             "input_schema": {"type": "object", "properties": {"to": {"type": "string"}, "content": {"type": "string"}, "msg_type": {"type": "string", "enum": list(VALID_MSG_TYPES)}}, "required": ["to", "content"]}},
-            {"name": "read_inbox", "description": "Read and drain your inbox.",
-             "input_schema": {"type": "object", "properties": {}}},
+            {"type": "function", "function": {"name": "bash", "description": "Run a shell command.",
+             "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+            {"type": "function", "function": {"name": "read_file", "description": "Read file contents.",
+             "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+            {"type": "function", "function": {"name": "write_file", "description": "Write content to file.",
+             "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+            {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in file.",
+             "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
+            {"type": "function", "function": {"name": "send_message", "description": "Send message to a teammate.",
+             "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "content": {"type": "string"}, "msg_type": {"type": "string", "enum": list(VALID_MSG_TYPES)}}, "required": ["to", "content"]}}},
+            {"type": "function", "function": {"name": "read_inbox", "description": "Read and drain your inbox.",
+             "parameters": {"type": "object", "properties": {}}}},
         ]
 
     def list_all(self) -> str:
@@ -251,7 +262,7 @@ class TeammateManager:
 TEAM = TeammateManager(TEAM_DIR)
 
 
-# -- Base tool implementations (these base tools are unchanged from s02) --
+# -- Base tool implementations --
 def _safe_path(p: str) -> Path:
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
@@ -319,30 +330,32 @@ TOOL_HANDLERS = {
     "broadcast":       lambda **kw: BUS.broadcast("lead", kw["content"], TEAM.member_names()),
 }
 
-# these base tools are unchanged from s02
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "spawn_teammate", "description": "Spawn a persistent teammate that runs in its own thread.",
-     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "prompt": {"type": "string"}}, "required": ["name", "role", "prompt"]}},
-    {"name": "list_teammates", "description": "List all teammates with name, role, status.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "send_message", "description": "Send a message to a teammate's inbox.",
-     "input_schema": {"type": "object", "properties": {"to": {"type": "string"}, "content": {"type": "string"}, "msg_type": {"type": "string", "enum": list(VALID_MSG_TYPES)}}, "required": ["to", "content"]}},
-    {"name": "read_inbox", "description": "Read and drain the lead's inbox.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "broadcast", "description": "Send a message to all teammates.",
-     "input_schema": {"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]}},
+    {"type": "function", "function": {"name": "bash", "description": "Run a shell command.",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read file contents.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Write content to file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
+    {"type": "function", "function": {"name": "spawn_teammate", "description": "Spawn a persistent teammate that runs in its own thread.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "prompt": {"type": "string"}}, "required": ["name", "role", "prompt"]}}},
+    {"type": "function", "function": {"name": "list_teammates", "description": "List all teammates with name, role, status.",
+     "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "send_message", "description": "Send a message to a teammate's inbox.",
+     "parameters": {"type": "object", "properties": {"to": {"type": "string"}, "content": {"type": "string"}, "msg_type": {"type": "string", "enum": list(VALID_MSG_TYPES)}}, "required": ["to", "content"]}}},
+    {"type": "function", "function": {"name": "read_inbox", "description": "Read and drain the lead's inbox.",
+     "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "broadcast", "description": "Send a message to all teammates.",
+     "parameters": {"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]}}},
 ]
 
 
 def agent_loop(messages: list):
+    if not any(m.get("role") == "system" for m in messages):
+        messages.insert(0, {"role": "system", "content": SYSTEM})
+
     while True:
         inbox = BUS.read_inbox("lead")
         if inbox:
@@ -350,31 +363,39 @@ def agent_loop(messages: list):
                 "role": "user",
                 "content": f"<inbox>{json.dumps(inbox, indent=2)}</inbox>",
             })
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
-            system=SYSTEM,
             messages=messages,
             tools=TOOLS,
             max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        choice = response.choices[0]
+        message = choice.message
+        finish_reason = choice.finish_reason
+
+        assistant_msg = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in message.tool_calls
+            ]
+        messages.append(assistant_msg)
+
+        if finish_reason != "tool_calls":
             return
+
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}:")
-                print(str(output)[:200])
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": str(output),
-                })
+        for tc in message.tool_calls:
+            handler = TOOL_HANDLERS.get(tc.function.name)
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                output = handler(**args) if handler else f"Unknown tool: {tc.function.name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {tc.function.name}:")
+            print(str(output)[:200])
+            results.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
 
 
@@ -395,9 +416,7 @@ if __name__ == "__main__":
             continue
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        last = history[-1]
+        if last["role"] == "assistant" and last.get("content"):
+            print(last["content"])
         print()
