@@ -226,7 +226,6 @@ def agent_loop(messages: list):
         if finish_reason != "tool_calls":
             return
 
-        results = []
         for tc in message.tool_calls:
             handler = TOOL_HANDLERS.get(tc.function.name)
             try:
@@ -236,8 +235,7 @@ def agent_loop(messages: list):
                 output = f"Error: {e}"
             print(f"> {tc.function.name}:")
             print(str(output)[:200])
-            results.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
-        messages.append({"role": "user", "content": results})
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
 
 
 if __name__ == "__main__":
